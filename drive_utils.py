@@ -8,16 +8,20 @@ import io
 import os
 
 SCOPES = ['https://www.googleapis.com/auth/drive']
-SERVICE_ACCOUNT_FILE = 'retail-labeling-app-42c317180841.json'
+
+# Getting JSON file from Streamlit Secrets
+import json
+import streamlit as st
+from google.oauth2 import service_account
+
+creds_dict = json.loads(st.secrets["GDRIVE_KEY"])
 
 # Set up credentials and drive service
-credentials = service_account.Credentials.from_service_account_file(
-    SERVICE_ACCOUNT_FILE, scopes=SCOPES)
+credentials = service_account.Credentials.from_service_account_info(creds_dict, scopes=SCOPES)
 drive_service = build('drive', 'v3', credentials=credentials)
 
 # Root folder name (e.g., "LabelingAppData")
 ROOT_FOLDER_NAME = 'LabelingAppData'
-
 
 def get_folder_id_by_name(name, parent_id=None):
     query = f"mimeType='application/vnd.google-apps.folder' and name='{name}'"
