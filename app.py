@@ -1,132 +1,139 @@
+# app.py
+
 import streamlit as st
 import pandas as pd
-import os
-import random
 from datetime import datetime
+import drive_utils as du
 
-# --- CONFIG ---
-DATASET_PATH = "Abilene_tx_500mi.csv"
-IMAGE_FOLDER = "Abilene_tx_500mi_files"
-LABEL_FILE = "labels.csv"
-USER_FILE = "users.csv"
-BATCH_SIZE = 30
+# Set up page
+st.set_page_config(page_title="Stolen Items Labeling App", layout="centered")
 
-# --- Load Users ---
-def load_users():
-    if not os.path.isfile(USER_FILE):
-        return {}
-    df = pd.read_csv(USER_FILE)
-    return dict(zip(df.username, df.password))
+# --- Globals ---
+ROOT_FOLDER_NAME = 'LabelingAppData'
+LABELS_CSV = 'labels.csv'
+USERS_CSV = 'users.csv'
+COMPANIES_CSV = 'companies.csv'
 
-# --- Register User ---
-def register_user(username, password):
-    if os.path.isfile(USER_FILE):
-        df = pd.read_csv(USER_FILE)
-        if username in df.username.values:
-            return False
-        df = pd.concat([df, pd.DataFrame([[username, password]], columns=['username', 'password'])])
-    else:
-        df = pd.DataFrame([[username, password]], columns=['username', 'password'])
-    df.to_csv(USER_FILE, index=False)
-    return True
+# --- Select latest dataset folder ---
+date_folders = du.list_date_folders()
+latest_folder = date_folders[0] if date_folders else None
+if latest_folder:
+    date_folder_id = latest_folder['id']
+    dataset_csv = du.download_csv("Abilene_tx_500mi.csv", date_folder_id)
+    image_folder_id = du.get_folder_id_by_name("Abilene_tx_500mi_files", parent_id=date_folder_id)
+else:
+    st.error("No dataset folders found in Drive")
+    st.stop()
 
-# --- Load Data ---
-@st.cache_data
-def load_data():
-    return pd.read_csv(DATASET_PATH)
+# --- Load config files ---
+users_df = du.download_csv(USERS_CSV, du.get_folder_id_by_name(ROOT_FOLDER_NAME))
+companies_df = du.download_csv(COMPANIES_CSV, du.get_folder_id_by_name(ROOT_FOLDER_NAME))
+labels_df = du.download_csv(LABELS_CSV, du.get_folder_id_by_name(ROOT_FOLDER_NAME))
+company_list = companies_df['company'].dropna().unique().tolist() if not companies_df.empty else []
 
-# --- Save Label ---
-def save_label(data):
-    file_exists = os.path.isfile(LABEL_FILE)
-    df = pd.DataFrame([data])
-    df.to_csv(LABEL_FILE, mode='a', header=not file_exists, index=False)
 
-# --- Load Label History ---
-def get_user_progress(username):
-    if not os.path.isfile(LABEL_FILE):
-        return pd.DataFrame(), 0, 0
-    df = pd.read_csv(LABEL_FILE)
-    user_labels = df[df['username'] == username]
-    batches = user_labels.shape[0] // BATCH_SIZE
-    current_batch = user_labels.shape[0] % BATCH_SIZE
-    return user_labels, batches, current_batch
-
-# --- Streamlit UI ---
-st.set_page_config(page_title="Stolen Item Labeling", layout="centered")
-
-if "user" not in st.session_state:
-    st.title("🔐 Retailer Portal")
+# --- Login/Register ---
+if "user_email" not in st.session_state:
+    st.title("🔐 Retailer Access Portal")
     mode = st.radio("Choose an option:", ["Login", "Register"])
 
-    username = st.text_input("Username")
-    password = st.text_input("Password", type="password")
+    if mode == "Register":
+        with st.form("register_form"):
+            st.subheader("Register")
+            first = st.text_input("First Name")
+            last = st.text_input("Last Name")
+            email = st.text_input("Email")
+            company = st.selectbox("Select Your Company", company_list)
+            password = st.text_input("Password", type="password")
+            submit = st.form_submit_button("Register")
 
-    if mode == "Login":
+            if submit:
+                if email in users_df['email'].values:
+                    st.warning("Email already registered.")
+                else:
+                    new_user = pd.DataFrame([[first, last, email, company, password]],
+                                             columns=['first_name','last_name','email','company','password'])
+                    users_df = pd.concat([users_df, new_user], ignore_index=True)
+                    du.upload_csv(users_df, USERS_CSV, du.get_folder_id_by_name(ROOT_FOLDER_NAME))
+                    st.success("Account created! Please login.")
+                    st.rerun()
+
+    else:
+        email = st.text_input("Email")
+        password = st.text_input("Password", type="password")
         if st.button("Login"):
-            users = load_users()
-            if username in users and users[username] == password:
-                st.session_state.user = username
+            match = users_df[(users_df['email'] == email) & (users_df['password'] == password)]
+            if not match.empty:
+                st.session_state.user_email = email
+                st.session_state.user_company = match.iloc[0]['company']
                 st.rerun()
             else:
                 st.error("Invalid credentials")
-    else:
-        if st.button("Register"):
-            success = register_user(username, password)
-            if success:
-                st.success("Account created! You can now log in.")
-            else:
-                st.error("Username already exists.")
 
 else:
-    st.title("🔍 Item Labeling App")
-    st.markdown(f"Welcome, **{st.session_state.user}**")
+    st.title("📸 Label Marketplace Listings")
+    st.write(f"Logged in as: **{st.session_state.user_email}** from **{st.session_state.user_company}**")
 
-    df = load_data()
-    labeled_df, completed_batches, current_batch_size = get_user_progress(st.session_state.user)
+    user_labels = labels_df[labels_df['email'] == st.session_state.user_email] if not labels_df.empty else pd.DataFrame()
+    batch_count = user_labels.shape[0] // 30
+    current_batch = user_labels.shape[0] % 30
+    st.write(f"Progress: {current_batch}/30 in current batch")
+    st.write(f"Completed batches: {batch_count}")
 
-    st.write(f"Progress: {current_batch_size}/30 in current batch")
-    st.write(f"Completed batches: {completed_batches}")
+    remaining = dataset_csv[~dataset_csv['photo_url'].isin(user_labels['photo_url'] if not user_labels.empty else [])]
+    if current_batch >= 30:
+        if st.button("✅ Start new batch"):
+            current_batch = 0
+            st.rerun()
 
-    remaining = df[~df['photo_url'].isin(labeled_df['photo_url'])]
-    if current_batch_size >= BATCH_SIZE:
-        if st.button("✅ Label more images (start new batch)"):
-            current_batch_size = 0
-    if current_batch_size < BATCH_SIZE:
-        sample = remaining.sample(1).iloc[0]
-        image_path = os.path.join(IMAGE_FOLDER, os.path.basename(sample['photo_url']))
+    if current_batch < 30 and not remaining.empty:
+        row = remaining.sample(1).iloc[0]
+        image_name = row['photo_url'].split('/')[-1]
+        file_id = du.get_image_file_id(image_name, image_folder_id)
+        if file_id:
+            image_url = f"https://drive.google.com/uc?export=view&id={file_id}"
+            st.image(image_url, use_column_width=True)
 
-        if os.path.exists(image_path):
-            st.image(image_path, use_column_width=True)
-        else:
-            st.warning(f"Image not found: {image_path}")
+        st.markdown(f"**Title:** {row['title']}")
+        st.markdown(f"**Price:** {row['price']}")
+        st.markdown(f"**Location:** {row['location']}")
+        st.markdown(f"**[View Listing]({row['listing_url']})**")
 
-        st.markdown(f"**Title:** {sample['title']}")
-        st.markdown(f"**Price:** {sample['price']}")
-        st.markdown(f"**Location:** {sample['location']}")
-        st.markdown(f"**[View Listing]({sample['listing_url']})**")
-
-        score = st.slider("Suspicion Level (1 = Not suspicious, 5 = Definitely stolen)", 1, 5, 3)
+        score = st.slider("Suspicion Score (1 = Not suspicious, 5 = Definitely stolen)", 1, 5, 3)
         binary_flag = st.radio("Is this item likely stolen?", ["Yes", "No"])
 
         if st.button("Submit Label"):
-            label = {
-                "listing_url": sample['listing_url'],
-                "photo_url": sample['photo_url'],
-                "price": sample['price'],
-                "title": sample['title'],
-                "location": sample['location'],
-                "origin_city_list": sample['origin_city_list'],
-                "username": st.session_state.user,
-                "image_file": os.path.basename(sample['photo_url']),
-                "score_1_5": score,
-                "binary_flag": binary_flag,
-                "timestamp": datetime.now().isoformat()
-            }
-            save_label(label)
+            new_label = pd.DataFrame([[row['listing_url'], row['photo_url'], row['price'], row['title'], row['location'],
+                                       row['origin_city_list'], st.session_state.user_email,
+                                       st.session_state.user_company, image_name, score, binary_flag, datetime.now().isoformat()]],
+                                     columns=labels_df.columns)
+            labels_df = pd.concat([labels_df, new_label], ignore_index=True)
+            du.upload_csv(labels_df, LABELS_CSV, du.get_folder_id_by_name(ROOT_FOLDER_NAME))
             st.success("Label submitted!")
             st.rerun()
 
-    st.markdown("---")
-    if st.button("🔓 Logout"):
-        del st.session_state.user
+    st.divider()
+    if st.button("🔒 Logout"):
+        del st.session_state.user_email
+        del st.session_state.user_company
         st.rerun()
+
+# --- Manager portal ---
+if st.sidebar.checkbox("Manager Portal"):
+    st.sidebar.title("🛠 Manager Tools")
+
+    if users_df.empty:
+        st.sidebar.info("No users registered yet.")
+    else:
+        st.sidebar.subheader("Registered Users")
+        st.sidebar.dataframe(users_df[['first_name','last_name','email','company']])
+
+    st.sidebar.subheader("Manage Companies")
+    new_company = st.sidebar.text_input("Add New Company")
+    if st.sidebar.button("Add Company"):
+        if new_company not in company_list:
+            companies_df = pd.concat([companies_df, pd.DataFrame([[new_company]], columns=['company'])], ignore_index=True)
+            du.upload_csv(companies_df, COMPANIES_CSV, du.get_folder_id_by_name(ROOT_FOLDER_NAME))
+            st.sidebar.success(f"Added {new_company}")
+        else:
+            st.sidebar.warning("Company already exists")
